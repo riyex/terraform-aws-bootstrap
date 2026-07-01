@@ -27,6 +27,12 @@ variable "dynamodb_table_name" {
   type        = string
 }
 
+variable "enable_dynamodb_state_lock" {
+  type        = bool
+  default     = true
+  description = "Create a DynamoDB table for state locking. DynamoDB-based locking is deprecated in favor of native S3 state locking (set the backend's `use_lockfile = true`); set this to `false` to skip the table. See <https://developer.hashicorp.com/terraform/language/backend/s3#state-locking>"
+}
+
 variable "enable_s3_public_access_block" {
   description = "Bool for toggling whether the s3 public access block resource should be enabled."
   type        = bool

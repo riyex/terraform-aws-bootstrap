@@ -14,10 +14,15 @@ resource "aws_iam_account_alias" "alias" {
 
 module "terraform_state_bucket" {
   source  = "trussworks/s3-private-bucket/aws"
-  version = "~> 8.0.2"
+  version = "~> 9.0.1"
 
   bucket         = local.state_bucket
   logging_bucket = local.logging_bucket
+
+  # Keep versioning on the state bucket so a corrupted or accidentally
+  # overwritten state file can be recovered. Set explicitly rather than
+  # relying on the upstream module default.
+  versioning_status = "Enabled"
 
   use_account_alias_prefix = false
   bucket_key_enabled       = var.bucket_key_enabled
@@ -36,7 +41,7 @@ module "terraform_state_bucket" {
 
 module "terraform_state_bucket_logs" {
   source  = "trussworks/logs/aws"
-  version = "~> 17.0.0"
+  version = "~> 18.0.0"
 
   s3_bucket_name          = local.logging_bucket
   default_allow           = false
@@ -49,11 +54,16 @@ module "terraform_state_bucket_logs" {
 #
 # Terraform state locking
 #
+# DynamoDB-based locking is deprecated in favor of native S3 state locking
+# (the backend's `use_lockfile = true`). Set enable_dynamodb_state_lock = false
+# to skip this table once your backends use the S3 lockfile.
 
 # Ignore warnings about point-in-time recovery since this table holds no data
 # The terraform state lock is meant to be ephemeral and does not need recovery
 #tfsec:ignore:AWS086
 resource "aws_dynamodb_table" "terraform_state_lock" {
+  count = var.enable_dynamodb_state_lock ? 1 : 0
+
   name     = var.dynamodb_table_name
   hash_key = "LockID"
 

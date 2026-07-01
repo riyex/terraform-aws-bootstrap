@@ -9,6 +9,6 @@ output "logging_bucket" {
 }
 
 output "dynamodb_table" {
-  description = "The name of the dynamo db table"
-  value       = aws_dynamodb_table.terraform_state_lock.id
+  description = "The name of the dynamo db table, or null when enable_dynamodb_state_lock is false"
+  value       = one(aws_dynamodb_table.terraform_state_lock[*].id)
 }

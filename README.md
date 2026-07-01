@@ -5,9 +5,15 @@ This solves a 🐓 and 🥚 problem in new AWS accounts (or for AWS accounts tha
 * AWS Account Alias for the AWS account
 * S3 bucket for remote state file (using the TrussWorks [s3-private-bucket module](https://registry.terraform.io/modules/trussworks/s3-private-bucket/aws))
 * S3 bucket for storing state bucket access logs (using the TrussWorks [logs module](https://registry.terraform.io/modules/trussworks/logs/aws))
-* DynamoDB table for state locking and consistency checking
+* DynamoDB table for state locking and consistency checking (optional; see below)
+
+DynamoDB-based state locking is deprecated in favor of native S3 state locking (the backend's `use_lockfile = true`). The DynamoDB table is still created by default for backwards compatibility; set `enable_dynamodb_state_lock = false` to skip it once your backends use the S3 lockfile.
 
 If the AWS account you are using already has a Terraform state bucket and locking table, this may not be the right tool for you.
+
+> **Version 8.0.0** requires the **AWS provider `>= 6.0.0`**. The recommended native S3
+> state-locking backend (`use_lockfile = true`) additionally requires **Terraform `>= 1.10`**.
+> Upgrading from v7.x? See the [Release v8.0.0](#release-v800) upgrade path.
 
 ## Usage for bootstrapping
 
@@ -26,20 +32,20 @@ module "bootstrap" {
 | Name | Version |
 |------|---------|
 | terraform | >= 1.0 |
-| aws | >= 5.43.0 |
+| aws | >= 6.0.0 |
 
 ## Providers
 
 | Name | Version |
 |------|---------|
-| aws | >= 5.43.0 |
+| aws | >= 6.0.0 |
 
 ## Modules
 
 | Name | Source | Version |
 |------|--------|---------|
-| terraform_state_bucket | trussworks/s3-private-bucket/aws | ~> 8.0.2 |
-| terraform_state_bucket_logs | trussworks/logs/aws | ~> 17.0.0 |
+| terraform_state_bucket | trussworks/s3-private-bucket/aws | ~> 9.0.1 |
+| terraform_state_bucket_logs | trussworks/logs/aws | ~> 18.0.0 |
 
 ## Resources
 
@@ -58,6 +64,7 @@ module "bootstrap" {
 | bucket_purpose | Name to identify the bucket's purpose | `string` | `"tf-state"` | no |
 | dynamodb_point_in_time_recovery | Point-in-time recovery options | `bool` | `false` | no |
 | dynamodb_table_name | Name of the DynamoDB Table for locking Terraform state. | `string` | `"terraform-state-lock"` | no |
+| enable_dynamodb_state_lock | Create a DynamoDB table for state locking. DynamoDB-based locking is deprecated in favor of native S3 state locking (set the backend's `use_lockfile = true`); set this to `false` to skip the table. See <https://developer.hashicorp.com/terraform/language/backend/s3#state-locking> | `bool` | `true` | no |
 | enable_s3_public_access_block | Bool for toggling whether the s3 public access block resource should be enabled. | `bool` | `true` | no |
 | kms_master_key_id | The AWS KMS master key ID used for the SSE-KMS encryption of the state bucket. | `string` | `""` | no |
 | log_bucket_versioning | A string that indicates the versioning status for the log bucket. | `string` | `"Disabled"` | no |
@@ -69,7 +76,7 @@ module "bootstrap" {
 
 | Name | Description |
 |------|-------------|
-| dynamodb_table | The name of the dynamo db table |
+| dynamodb_table | The name of the dynamo db table, or null when enable_dynamodb_state_lock is false |
 | logging_bucket | The logging_bucket name |
 | state_bucket | The state_bucket name |
 <!-- END_TF_DOCS -->
@@ -85,9 +92,17 @@ If you are running your `aws` commands via [aws-vault](https://github.com/99desi
 Set up your `bootstrap/main.tf` file to look like the example above. Don't forget to include a `providers.tf` file that looks like this:
 
 ```hcl
+terraform {
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = ">= 6.0.0"
+    }
+  }
+}
+
 provider "aws" {
-  version = "~> 3.0"
-  region  = local.region
+  region = local.region
 }
 ```
 
@@ -111,11 +126,33 @@ To submit a PR, fork the repo and enable Github Actions. Enabling Github Actions
 
 ## Using the backend
 
-After provisioning the S3 bucket and the DynamoDB table, you need to tell Terraform that it exists and to use it. You do so by defining a backend. You can create a file called `terraform.tf` in your directory's root.
+After provisioning the S3 bucket, you need to tell Terraform to use it by defining a backend. You can create a file called `terraform.tf` in your directory's root.
+
+The recommended configuration uses native S3 state locking via `use_lockfile`, which requires Terraform 1.10 or later:
 
 ```hcl
 terraform {
-  required_version = "~> 0.13"
+  required_version = ">= 1.10"
+
+  backend "s3" {
+    bucket       = "bucket-name"
+    key          = "path-to/terraform.tfstate"
+    region       = "region"
+    encrypt      = "true"
+    use_lockfile = true
+  }
+}
+```
+
+`bucket` exists in the generated `$tfvars_file` from the `bootstrap` script's execution. Region also exists in that file or you passed it in the initial execution of the `bootstrap` script. The `key` is the path to the `terraform.tfstate` from the execution of the `bootstrap` script.
+
+### DynamoDB-based locking (deprecated)
+
+DynamoDB-based locking is deprecated and [will be removed in a future minor version](https://developer.hashicorp.com/terraform/language/backend/s3#state-locking) of Terraform. If you are still provisioning the DynamoDB table (`enable_dynamodb_state_lock = true`, the default), point the backend at it with `dynamodb_table`:
+
+```hcl
+terraform {
+  required_version = ">= 1.0"
 
   backend "s3" {
     bucket         = "bucket-name"
@@ -127,9 +164,45 @@ terraform {
 }
 ```
 
-`bucket` exists in the generated `$tfvars_file` from the `bootstrap` script's execution. Region also exists in that file or you passed it in the initial execution of the `bootstrap` script. The `key` is the path to the `terraform.tfstate` from the execution of the `bootstrap` script.
+To migrate from DynamoDB to native S3 locking, set both `dynamodb_table` and `use_lockfile = true` at the same time and run `terraform apply` across all of your workspaces so every client adopts the lockfile. Once every workspace is on the lockfile, drop `dynamodb_table` from the backend and set `enable_dynamodb_state_lock = false` to remove the table.
 
 ## Upgrade Path
+
+### Release v8.0.0
+
+Version 8.0.0 requires the **AWS provider 6.x** and bumps the underlying TrussWorks
+modules to versions that require it as well:
+
+| Dependency | v7.x | v8.0.0 |
+|------------|------|--------|
+| AWS provider | `>= 5.43.0` | `>= 6.0.0` |
+| [s3-private-bucket](https://registry.terraform.io/modules/trussworks/s3-private-bucket/aws) | `~> 8.0.2` | `~> 9.0.1` |
+| [logs](https://registry.terraform.io/modules/trussworks/logs/aws) | `~> 17.0.0` | `~> 18.0.0` |
+
+Before upgrading, move your configuration to the AWS provider 6.x line and work through
+the HashiCorp [version 6 upgrade guide](https://registry.terraform.io/providers/hashicorp/aws/latest/docs/guides/version-6-upgrade).
+Once you are on the 6.x provider, bump the module version and run `terraform plan` — the
+provider and underlying module bumps produce non-destructive plan diffs (mostly on S3
+lifecycle rules), so review the plan before applying.
+
+#### DynamoDB table is now optional
+
+The DynamoDB state-lock table is now created with `count` (gated by the new
+`enable_dynamodb_state_lock` variable, which defaults to `true`), so its address moves from
+`aws_dynamodb_table.terraform_state_lock` to `aws_dynamodb_table.terraform_state_lock[0]`.
+Existing users keeping the default should move the state to avoid a destroy/recreate of the
+table:
+
+```sh
+terraform state mv \
+  'module.bootstrap.aws_dynamodb_table.terraform_state_lock' \
+  'module.bootstrap.aws_dynamodb_table.terraform_state_lock[0]'
+```
+
+DynamoDB-based locking is [deprecated](https://developer.hashicorp.com/terraform/language/backend/s3#state-locking)
+in favor of native S3 state locking. To drop the table entirely, first switch your backends
+to `use_lockfile = true` (see [Using the backend](#using-the-backend)), then set
+`enable_dynamodb_state_lock = false` and apply to destroy the table.
 
 ### Release v3.0.0
 
